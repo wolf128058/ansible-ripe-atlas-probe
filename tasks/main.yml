@@ -1,0 +1,54 @@
+---
+- name: Install Packages
+  become: yes
+  apt:
+    cache_valid_time: 3600
+    pkg:
+      - git
+      - tar
+      - fakeroot
+      - libssl-dev
+      - libcap2-bin
+      - autoconf
+      - automake
+      - libtool
+      - build-essential
+    state: present
+
+- name: Remove directory for git-clone if it exists
+  file:
+    path: /opt/ripe-atlas-software-probe/
+    state: absent
+
+- name: Clone current atlas-probe from github
+  git:
+    repo: 'https://github.com/RIPE-NCC/ripe-atlas-software-probe.git'
+    dest: /opt/ripe-atlas-software-probe
+    clone: yes
+    update: yes 
+
+- name: switch to devel-branch on Ubuntu
+  shell: >
+    git checkout devel;
+    git submodule update;
+  args: 
+    chdir: /opt/ripe-atlas-software-probe
+    executable: /bin/bash
+  when: 'ansible_distribution == "Ubuntu"'
+
+- name: build that nice piece of software
+  shell: ./build-config/debian/bin/make-deb
+  args:
+    warn: no
+    chdir: "/opt/ripe-atlas-software-probe"
+    executable: /bin/bash
+
+- name: Find Created Deb-File
+  find:
+    paths: /opt/ripe-atlas-software-probe
+    patterns: "atlasswprobe*.deb"
+  register: files_matched
+
+- name: install that generated .deb-file
+  become: yes
+  apt: deb={{ files_matched.files[0].path }} state=present update_cache=true
