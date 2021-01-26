@@ -16,9 +16,19 @@
     state: present
 
 - name: Remove directory for git-clone if it exists
+  become: yes
   file:
-    path: /opt/ripe-atlas-software-probe/
+    path: /opt/ripe-atlas-software-probe
     state: absent
+
+- name: Creating Folder if not exists
+  become: yes
+  file:
+    path: /opt/ripe-atlas-software-probe
+    state: directory
+    mode: 0755
+    group: "{{ ansible_env.USER }}"
+    owner: "{{ ansible_env.USER }}"
 
 - name: Clone current atlas-probe from github
   git:
