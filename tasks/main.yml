@@ -1,64 +1,175 @@
 ---
-- name: Install Packages
+# RIPE Atlas Probe Installation
+# Uses official RIPE packages from ftp.ripe.net
+
+# Stop and remove existing installation
+- name: Check if old atlas service exists
+  become: yes
+  stat:
+    path: /etc/systemd/system/atlas.service
+  register: old_atlas_service
+
+- name: Stop old atlas service
+  become: yes
+  systemd:
+    name: atlas
+    state: stopped
+    enabled: no
+  when: old_atlas_service.stat.exists
+
+- name: Check if ripe-atlas service exists
+  become: yes
+  stat:
+    path: /etc/systemd/system/ripe-atlas.service
+  register: ripe_atlas_service_check
+
+- name: Stop ripe-atlas service
+  become: yes
+  systemd:
+    name: ripe-atlas
+    state: stopped
+    enabled: no
+  when: ripe_atlas_service_check.stat.exists
+
+- name: Remove existing installation directories
+  become: yes
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /opt/ripe-atlas-software-probe
+    - /usr/local/atlas
+
+# Install RIPE Atlas repository
+- name: Get system architecture
+  command: dpkg --print-architecture
+  register: system_arch
+  changed_when: false
+  check_mode: no
+
+- name: Get distribution codename
+  shell: . /etc/os-release && echo "$VERSION_CODENAME"
+  register: dist_codename
+  changed_when: false
+  check_mode: no
+
+- name: Map Ubuntu codename to Debian codename
+  set_fact:
+    debian_codename: "{{ {'noble': 'bookworm', 'jammy': 'bullseye', 'focal': 'bullseye'}.get(dist_codename.stdout, dist_codename.stdout) }}"
+
+- name: Download RIPE Atlas repository package
+  become: yes
+  get_url:
+    url: "https://ftp.ripe.net/ripe/atlas/software-probe/debian/dists/{{ debian_codename }}/main/binary-{{ system_arch.stdout }}/ripe-atlas-repo_1.5-5_all.deb"
+    dest: /tmp/ripe-atlas-repo.deb
+    mode: '0644'
+  check_mode: no
+
+- name: Install RIPE Atlas repository package
   become: yes
   apt:
-    cache_valid_time: 3600
-    pkg:
-      - git
-      - tar
-      - fakeroot
-      - libssl-dev
-      - libcap2-bin
-      - autoconf
-      - automake
-      - libtool
-      - build-essential
+    deb: /tmp/ripe-atlas-repo.deb
     state: present
+  check_mode: no
 
-- name: Remove directory for git-clone if it exists
+- name: Update apt cache
+  become: yes
+  apt:
+    update_cache: yes
+  check_mode: no
+
+# Determine version to install
+- name: Install ripe-atlas-probe package (latest)
+  become: yes
+  apt:
+    name: ripe-atlas-probe
+    state: latest
+    update_cache: no
+  when: atlas_probe_version == ""
+
+- name: Install ripe-atlas-probe package (specific version)
+  become: yes
+  apt:
+    name: "ripe-atlas-probe={{ atlas_probe_version }}*"
+    state: present
+    update_cache: no
+  when: atlas_probe_version != ""
+
+# Deploy probe key if defined
+- name: Deploy probe key
+  block:
+    - name: Ensure ripe-atlas config directory exists
+      become: yes
+      file:
+        path: /etc/ripe-atlas
+        state: directory
+        mode: '0755'
+        owner: ripe-atlas
+        group: ripe-atlas
+
+    - name: Decode Base64 probe key
+      set_fact:
+        _atlas_probe_key_decoded: "{{ atlas_probe_key_b64 | b64decode }}"
+      no_log: true
+      when: atlas_probe_key_b64 is defined
+
+    - name: Set probe key from direct variable
+      set_fact:
+        _atlas_probe_key_decoded: "{{ atlas_probe_key }}"
+      no_log: true
+      when: atlas_probe_key is defined and atlas_probe_key_b64 is not defined
+
+    - name: Deploy probe private key
+      become: yes
+      copy:
+        content: "{{ _atlas_probe_key_decoded }}"
+        dest: /etc/ripe-atlas/probe_key
+        mode: '0600'
+        owner: ripe-atlas
+        group: ripe-atlas
+      no_log: true
+      register: deploy_private_key
+
+    - name: Check if public key exists
+      become: yes
+      stat:
+        path: /etc/ripe-atlas/probe_key.pub
+      register: pubkey_stat
+
+    - name: Generate and deploy probe public key
+      become: yes
+      shell: ssh-keygen -y -f /etc/ripe-atlas/probe_key > /etc/ripe-atlas/probe_key.pub
+      when:
+        - deploy_private_key.changed or not pubkey_stat.stat.exists
+
+    - name: Set correct permissions on public key
+      become: yes
+      file:
+        path: /etc/ripe-atlas/probe_key.pub
+        mode: '0644'
+        owner: ripe-atlas
+        group: ripe-atlas
+      when:
+        - deploy_private_key.changed or not pubkey_stat.stat.exists
+        - not ansible_check_mode
+  when: atlas_probe_key_b64 is defined or atlas_probe_key is defined
+
+# Start service
+- name: Reload systemd daemon
+  become: yes
+  systemd:
+    daemon_reload: yes
+
+- name: Start and enable ripe-atlas service
+  become: yes
+  systemd:
+    name: ripe-atlas
+    state: started
+    enabled: yes
+
+# Cleanup
+- name: Remove temporary repository package
   become: yes
   file:
-    path: /opt/ripe-atlas-software-probe
+    path: /tmp/ripe-atlas-repo.deb
     state: absent
-
-- name: Creating Folder if not exists
-  become: yes
-  file:
-    path: /opt/ripe-atlas-software-probe
-    state: directory
-    mode: 0755
-    group: "{{ ansible_env.USER }}"
-    owner: "{{ ansible_env.USER }}"
-
-- name: Clone current atlas-probe from github
-  git:
-    repo: 'https://github.com/RIPE-NCC/ripe-atlas-software-probe.git'
-    dest: /opt/ripe-atlas-software-probe
-    clone: yes
-    update: yes 
-
-- name: switch to devel-branch on Ubuntu
-  shell: >
-    git checkout devel;
-    git submodule update;
-  args: 
-    chdir: /opt/ripe-atlas-software-probe
-    executable: /bin/bash
-  when: 'ansible_distribution == "Ubuntu"'
-
-- name: build that nice piece of software
-  shell: ./build-config/debian/bin/make-deb
-  args:
-    warn: no
-    chdir: "/opt/ripe-atlas-software-probe"
-    executable: /bin/bash
-
-- name: Find Created Deb-File
-  find:
-    paths: /opt/ripe-atlas-software-probe
-    patterns: "atlasswprobe*.deb"
-  register: files_matched
-
-- name: install that generated .deb-file
-  become: yes
-  apt: deb={{ files_matched.files[0].path }} state=present update_cache=true

@@ -1,0 +1,5 @@
+---
+# RIPE Atlas Probe version to install
+# Empty string = auto-detect latest stable tag (numeric or semver, excludes pre-release)
+# Or set explicitly: "5120", "5110", etc.
+atlas_probe_version: ""
